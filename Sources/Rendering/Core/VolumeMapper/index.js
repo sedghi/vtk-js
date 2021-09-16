@@ -72,6 +72,7 @@ const DEFAULT_VALUES = {
   autoAdjustSampleDistances: true,
   blendMode: BlendMode.COMPOSITE_BLEND,
   ipScalarRange: [-1000000.0, 1000000.0],
+  useExperimentalNorm16Texture: false,
 };
 
 // ----------------------------------------------------------------------------
@@ -91,6 +92,7 @@ export function extend(publicAPI, model, initialValues = {}) {
     'maximumSamplesPerRay',
     'autoAdjustSampleDistances',
     'blendMode',
+    'useExperimentalNorm16Texture',
   ]);
 
   macro.setGetArray(publicAPI, model, ['ipScalarRange'], 2);

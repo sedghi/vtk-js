@@ -483,10 +483,10 @@ function vtkOpenGLTexture(publicAPI, model) {
         //   return model.context.BYTE;
         case VtkDataTypes.UNSIGNED_CHAR:
           return model.context.UNSIGNED_BYTE;
-        // case VtkDataTypes.SHORT:
-        //   return model.context.SHORT;
-        // case VtkDataTypes.UNSIGNED_SHORT:
-        //   return model.context.UNSIGNED_SHORT;
+        case model.useNorm16 && VtkDataTypes.SHORT:
+          return model.context.SHORT;
+        case model.useNorm16 && VtkDataTypes.UNSIGNED_SHORT:
+          return model.context.UNSIGNED_SHORT;
         // case VtkDataTypes.INT:
         //   return model.context.INT;
         // case VtkDataTypes.UNSIGNED_INT:
@@ -1138,7 +1138,8 @@ function vtkOpenGLTexture(publicAPI, model) {
     depth,
     numComps,
     dataType,
-    data
+    data,
+    useExperimentalNorm16Texture
   ) => {
     const numPixelsIn = width * height * depth;
 
@@ -1157,9 +1158,39 @@ function vtkOpenGLTexture(publicAPI, model) {
     // and texture = (data - offset)/scale
     model.volumeInfo = { scale, offset, width, height, depth };
 
+    // Check whether 16bit texture extension is available
+    const ext = model.context.getExtension('EXT_texture_norm16');
+    model.useNorm16 = ext && useExperimentalNorm16Texture;
+
     // WebGL2 path, we have 3d textures etc
     if (model.openGLRenderWindow.getWebgl2()) {
       if (dataType === VtkDataTypes.FLOAT) {
+        return publicAPI.create3DFromRaw(
+          width,
+          height,
+          depth,
+          numComps,
+          dataType,
+          data
+        );
+      }
+      if (model.useNorm16 && dataType === VtkDataTypes.SHORT) {
+        for (let c = 0; c < numComps; ++c) {
+          model.volumeInfo.scale[c] = 65535.0;
+        }
+        return publicAPI.create3DFromRaw(
+          width,
+          height,
+          depth,
+          numComps,
+          dataType,
+          data
+        );
+      }
+      if (model.useNorm16 && dataType === VtkDataTypes.UNSIGNED_SHORT) {
+        for (let c = 0; c < numComps; ++c) {
+          model.volumeInfo.scale[c] = 32768.0;
+        }
         return publicAPI.create3DFromRaw(
           width,
           height,
