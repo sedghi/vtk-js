@@ -20,10 +20,12 @@ export interface IViewNodeInitialValues {
 export interface vtkViewNode extends vtkObject {
 
 	/**
-	 * 
+	 * Add a child view node to this node, created from the renderable given as argument
+	 * If the node creation fails or the argument is falsy, returns undefined
+	 * Otherwise, returns the newly created node or the existing node
 	 * @param dobj 
 	 */
-	addMissingNode(dobj: any): void;
+	addMissingNode(dobj: any): vtkViewNode | undefined;
 
 	/**
 	 * 
@@ -65,6 +67,12 @@ export interface vtkViewNode extends vtkObject {
 	 * @param type 
 	 */
 	getFirstAncestorOfType(type: any): void;
+
+	/**
+	 * Find the last parent/grandparent of the desired type
+	 * @param type 
+	 */
+	getLastAncestorOfType(type: any): void;
 
 	/**
 	 * 

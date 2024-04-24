@@ -5,7 +5,9 @@ import vtkForwardPass from 'vtk.js/Sources/Rendering/OpenGL/ForwardPass';
 import vtkOpenGLHardwareSelector from 'vtk.js/Sources/Rendering/OpenGL/HardwareSelector';
 import vtkShaderCache from 'vtk.js/Sources/Rendering/OpenGL/ShaderCache';
 import vtkOpenGLTextureUnitManager from 'vtk.js/Sources/Rendering/OpenGL/TextureUnitManager';
-import vtkOpenGLViewNodeFactory from 'vtk.js/Sources/Rendering/OpenGL/ViewNodeFactory';
+import vtkOpenGLViewNodeFactory, {
+  registerOverride,
+} from 'vtk.js/Sources/Rendering/OpenGL/ViewNodeFactory';
 import vtkRenderPass from 'vtk.js/Sources/Rendering/SceneGraph/RenderPass';
 import vtkRenderWindowViewNode from 'vtk.js/Sources/Rendering/SceneGraph/RenderWindowViewNode';
 import { createContextProxyHandler } from 'vtk.js/Sources/Rendering/OpenGL/RenderWindow/ContextProxy';
@@ -19,6 +21,36 @@ const SCREENSHOT_PLACEHOLDER = {
   width: '100%',
   height: '100%',
 };
+
+const parentMethodsToProxy = [
+  'activateTexture',
+  'deactivateTexture',
+  'disableCullFace',
+  'enableCullFace',
+  'get3DContext',
+  'getActiveFramebuffer',
+  'getContext',
+  'getDefaultTextureByteSize',
+  'getDefaultTextureInternalFormat',
+  'getDefaultToWebgl2',
+  'getGLInformations',
+  'getGraphicsMemoryInfo',
+  'getGraphicsResourceForObject',
+  'getHardwareMaximumLineWidth',
+  'getPixelData',
+  'getShaderCache',
+  'getTextureUnitForTexture',
+  'getTextureUnitManager',
+  'getWebgl2',
+  'makeCurrent',
+  'releaseGraphicsResources',
+  'releaseGraphicsResourcesForObject',
+  'restoreContext',
+  'setActiveFramebuffer',
+  'setContext',
+  'setDefaultToWebgl2',
+  'setGraphicsResourceForObject',
+];
 
 function checkRenderTargetSupport(gl, format, type) {
   // create temporary frame buffer and texture
@@ -84,7 +116,14 @@ function vtkOpenGLRenderWindow(publicAPI, model) {
   // Set our className
   model.classHierarchy.push('vtkOpenGLRenderWindow');
 
-  const cachingContextHandler = createContextProxyHandler();
+  // Only create a cachingContextHandler if needed
+  let cachingContextHandler;
+  function getCachingContextHandler() {
+    if (!cachingContextHandler) {
+      cachingContextHandler = createContextProxyHandler();
+    }
+    return cachingContextHandler;
+  }
 
   publicAPI.getViewNodeFactory = () => model.myFactory;
 
@@ -141,31 +180,53 @@ function vtkOpenGLRenderWindow(publicAPI, model) {
 
       publicAPI.prepareNodes();
       publicAPI.addMissingNodes(model.renderable.getRenderersByReference());
+      publicAPI.addMissingNodes(
+        model.renderable.getChildRenderWindowsByReference()
+      );
       publicAPI.removeUnusedNodes();
 
       publicAPI.initialize();
+
       model.children.forEach((child) => {
-        child.setOpenGLRenderWindow(publicAPI);
+        // Children can be openGl renderer or openGl render windows
+        // Only openGl renderers have a method setOpenGLRenderWindow
+        child.setOpenGLRenderWindow?.(publicAPI);
       });
     }
   };
 
   publicAPI.initialize = () => {
     if (!model.initialized) {
-      model.context = publicAPI.get3DContext();
-      model.textureUnitManager = vtkOpenGLTextureUnitManager.newInstance();
-      model.textureUnitManager.setContext(model.context);
-      model.shaderCache.setContext(model.context);
-      // initialize blending for transparency
-      const gl = model.context;
-      gl.blendFuncSeparate(
-        gl.SRC_ALPHA,
-        gl.ONE_MINUS_SRC_ALPHA,
-        gl.ONE,
-        gl.ONE_MINUS_SRC_ALPHA
+      // Set root parent if there is one
+      // Some methods of the root parent are proxied (see parentMethodsToProxy)
+      model.rootOpenGLRenderWindow = publicAPI.getLastAncestorOfType(
+        'vtkOpenGLRenderWindow'
       );
-      gl.depthFunc(gl.LEQUAL);
-      gl.enable(gl.BLEND);
+
+      if (model.rootOpenGLRenderWindow) {
+        // Initialize a 2D context that will copy the content of the root parent
+        model.context2D = publicAPI.get2DContext();
+      } else {
+        // Initialize a 3D context that may be used by child render windows
+        model.context = publicAPI.get3DContext();
+        publicAPI.resizeFromChildRenderWindows();
+        if (model.context) {
+          createGLContext();
+        }
+        model.textureUnitManager = vtkOpenGLTextureUnitManager.newInstance();
+        model.textureUnitManager.setContext(model.context);
+        model.shaderCache.setContext(model.context);
+        // initialize blending for transparency
+        const gl = model.context;
+        gl.blendFuncSeparate(
+          gl.SRC_ALPHA,
+          gl.ONE_MINUS_SRC_ALPHA,
+          gl.ONE,
+          gl.ONE_MINUS_SRC_ALPHA
+        );
+        gl.depthFunc(gl.LEQUAL);
+        gl.enable(gl.BLEND);
+      }
       model.initialized = true;
     }
   };
@@ -262,8 +323,11 @@ function vtkOpenGLRenderWindow(publicAPI, model) {
         model.canvas.getContext('experimental-webgl', options);
     }
 
-    return new Proxy(result, cachingContextHandler);
+    return new Proxy(result, getCachingContextHandler());
   };
+
+  publicAPI.get2DContext = (options = {}) =>
+    model.canvas.getContext('2d', options);
 
   publicAPI.restoreContext = () => {
     const rp = vtkRenderPass.newInstance();
@@ -1013,6 +1077,47 @@ function vtkOpenGLRenderWindow(publicAPI, model) {
     if (model.notifyStartCaptureImage) {
       getCanvasDataURL();
     }
+    publicAPI.copyParentContent();
+    const childrenRW = model.renderable.getChildRenderWindowsByReference();
+    for (let i = 0; i < childrenRW.length; ++i) {
+      publicAPI.getViewNodeFor(childrenRW[i])?.traverseAllPasses();
+    }
+  };
+
+  publicAPI.copyParentContent = () => {
+    const rootParent = model.rootOpenGLRenderWindow;
+    if (!rootParent || !model.context2D) {
+      return;
+    }
+    const parentCanvas = rootParent.getCanvas();
+    const selfCanvas = model.canvas;
+    model.context2D.drawImage(
+      parentCanvas,
+      0,
+      parentCanvas.height - selfCanvas.height, // source y axis is inverted
+      selfCanvas.width,
+      selfCanvas.height,
+      0,
+      0,
+      selfCanvas.width,
+      selfCanvas.height
+    );
+  };
+
+  publicAPI.resizeFromChildRenderWindows = () => {
+    // Adapt the size of the parent render window to the child render windows
+    const childrenRW = model.renderable.getChildRenderWindowsByReference();
+    if (childrenRW.length > 0) {
+      const maxSize = [0, 0];
+      for (let i = 0; i < childrenRW.length; ++i) {
+        const childSize = publicAPI.getViewNodeFor(childrenRW[i])?.getSize();
+        if (childSize) {
+          maxSize[0] = childSize[0] > maxSize[0] ? childSize[0] : maxSize[0];
+          maxSize[1] = childSize[1] > maxSize[1] ? childSize[1] : maxSize[1];
+        }
+      }
+      publicAPI.setSize(...maxSize);
+    }
   };
 
   publicAPI.disableCullFace = () => {
@@ -1074,10 +1179,14 @@ function vtkOpenGLRenderWindow(publicAPI, model) {
   }
 
   publicAPI.delete = macro.chain(
+    () => {
+      if (model.context) {
+        deleteGLContext();
+      }
+    },
     clearEvents,
     publicAPI.delete,
-    publicAPI.setViewStream,
-    deleteGLContext
+    publicAPI.setViewStream
   );
 
   // Do not trigger modified for performance reasons
@@ -1146,6 +1255,18 @@ function vtkOpenGLRenderWindow(publicAPI, model) {
       glRen?.releaseGraphicsResources();
     });
   };
+
+  // Proxy some methods if needed
+  const publicAPIBeforeProxy = { ...publicAPI };
+  parentMethodsToProxy.forEach((methodName) => {
+    publicAPI[methodName] = (...args) => {
+      if (model.rootOpenGLRenderWindow) {
+        // Proxy only methods when the render window has a parent
+        return model.rootOpenGLRenderWindow[methodName](...args);
+      }
+      return publicAPIBeforeProxy[methodName](...args);
+    };
+  });
 }
 
 // ----------------------------------------------------------------------------
@@ -1157,6 +1278,7 @@ const DEFAULT_VALUES = {
   shaderCache: null,
   initialized: false,
   context: null,
+  context2D: null,
   canvas: null,
   cursorVisibility: true,
   cursor: 'pointer',
@@ -1182,9 +1304,10 @@ export function extend(publicAPI, model, initialValues = {}) {
   vtkRenderWindowViewNode.extend(publicAPI, model, initialValues);
 
   // Create internal instances
-  model.canvas = document.createElement('canvas');
-  model.canvas.style.width = '100%';
-  createGLContext();
+  if (!model.canvas) {
+    model.canvas = document.createElement('canvas');
+    model.canvas.style.width = '100%';
+  }
 
   if (!model.selector) {
     model.selector = vtkOpenGLHardwareSelector.newInstance();
@@ -1206,17 +1329,12 @@ export function extend(publicAPI, model, initialValues = {}) {
   model._glInformation = null;
 
   model.myFactory = vtkOpenGLViewNodeFactory.newInstance();
-  /* eslint-disable no-use-before-define */
-  model.myFactory.registerOverride('vtkRenderWindow', newInstance);
-  /* eslint-enable no-use-before-define */
 
   model.shaderCache = vtkShaderCache.newInstance();
   model.shaderCache.setOpenGLRenderWindow(publicAPI);
 
   // setup default forward pass rendering
   model.renderPasses[0] = vtkForwardPass.newInstance();
-
-  macro.event(publicAPI, model, 'imageReady');
 
   // Build VTK API
   macro.get(publicAPI, model, [
@@ -1225,11 +1343,13 @@ export function extend(publicAPI, model, initialValues = {}) {
     'webgl2',
     'useBackgroundImage',
     'activeFramebuffer',
+    'rootOpenGLRenderWindow',
   ]);
 
   macro.setGet(publicAPI, model, [
     'initialized',
     'context',
+    'context2D',
     'canvas',
     'renderPasses',
     'notifyStartCaptureImage',
@@ -1239,6 +1359,7 @@ export function extend(publicAPI, model, initialValues = {}) {
   ]);
 
   macro.setGetArray(publicAPI, model, ['size'], 2);
+  macro.event(publicAPI, model, 'imageReady');
   macro.event(publicAPI, model, 'windowResizeEvent');
 
   // Object methods
@@ -1263,3 +1384,6 @@ export default {
   pushMonitorGLContextCount,
   popMonitorGLContextCount,
 };
+
+// Register ourself to OpenGL backend if imported
+registerOverride('vtkRenderWindow', newInstance);
