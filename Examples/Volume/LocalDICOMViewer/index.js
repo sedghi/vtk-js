@@ -17,6 +17,21 @@ const renderWindow = fullScreenRenderer.getRenderWindow();
 const imageMapper = vtkImageMapper.newInstance();
 const imageActor = vtkImageSlice.newInstance();
 imageActor.setMapper(imageMapper);
+
+//
+//
+//
+//
+//
+// Setting this to false just to test the RGB images
+//
+//
+//
+//
+//
+//
+imageActor.getProperty().setIndependentComponents(false);
+
 renderer.addActor(imageActor);
 
 function setupVisualization(vtkImage) {
